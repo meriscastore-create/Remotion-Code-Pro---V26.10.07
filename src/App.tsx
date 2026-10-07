@@ -37,6 +37,9 @@ import {
   ALL_BACKGROUND_STYLES,
   BACKGROUND_STYLE_CATEGORIES
 } from './service/iconGenerator';
+import { AISettingsModal } from './components/AISettingsModal';
+import { getAISettings, AISettings } from './service/aiProviders';
+import { renderCompositionInBrowser, isServerRenderAvailable } from './service/clientVideoRenderer';
 import { 
   Upload, 
   Play, 
@@ -102,7 +105,8 @@ import {
   FolderOpen,
   PlayCircle,
   FilePlus,
-  ArrowDownToLine
+  ArrowDownToLine,
+  Key
 } from 'lucide-react';
 
 interface BulkImageItem {
@@ -1764,6 +1768,10 @@ const App: React.FC = () => {
   const [bulkRenderErrorMsg, setBulkRenderErrorMsg] = useState<string | null>(null);
   const [bulkSuccessAlert, setBulkSuccessAlert] = useState<string | null>(null);
 
+  // AI Provider & API Keys States (Gemini Bulk, OpenRouter, 9Router)
+  const [isAiSettingsModalOpen, setIsAiSettingsModalOpen] = useState<boolean>(false);
+  const [aiSettings, setAiSettings] = useState<AISettings>(() => getAISettings());
+
   const bulkRenderAbortRef = useRef<boolean>(false);
   const bulkRenderActiveSessionRef = useRef<string | null>(null);
   const bulkTsxFileInputRef = useRef<HTMLInputElement>(null);
@@ -2520,33 +2528,7 @@ const App: React.FC = () => {
         const frameInputFormat = useAlpha ? 'png' : 'jpeg';
         const frameMimeType = useAlpha ? 'image/png' : 'image/jpeg';
 
-        // 1. Start FFmpeg render session
-        const kwData = generatePopovKeywords(currentItem.title || currentItem.name);
-        const startResp = await fetch('/api/render/start', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            codec: bulkRenderCodec,
-            alpha: useAlpha,
-            fps: targetFps,
-            width: targetW,
-            height: targetH,
-            title: currentItem.title || currentItem.name,
-            keywords: kwData.all,
-            inputFormat: frameInputFormat,
-          }),
-        });
-
-        if (!startResp.ok) {
-          const errJson = await startResp.json().catch(() => ({}));
-          throw new Error(errJson.error || 'Gagal memulai sesi render FFmpeg di server.');
-        }
-
-        const startData = await startResp.json();
-        sessionId = startData.sessionId;
-        bulkRenderActiveSessionRef.current = sessionId;
-
-        // 2. Prepare Sandbox iframe
+        // Prepare Sandbox iframe first
         const finalTsx = ensureConfigurationConstants(
           currentItem.code,
           targetDuration,
@@ -2573,6 +2555,112 @@ const App: React.FC = () => {
 
         const sandboxIframe = renderSandboxIframeRef.current;
         if (!sandboxIframe) throw new Error('Elemen sandbox render iframe tidak tersedia.');
+
+        // Cek ketersediaan server FFmpeg (jika di Cloudflare Pages, server tidak ada sehingga pakai browser recorder langsung)
+        const isServerUp = await isServerRenderAvailable();
+
+        if (!isServerUp) {
+          // Cloudflare Pages Mode: 100% Client-Side In-Browser Video Render (Tanpa API Key, Tanpa Server)
+          setBulkRenderProgressText(`[${i + 1}/${itemsToProcess.length}] ${currentItem.name}: Menjalankan Browser Video Recorder (Cloudflare Mode)...`);
+
+          const clientResult = await renderCompositionInBrowser({
+            renderHtml,
+            width: targetW,
+            height: targetH,
+            fps: targetFps,
+            duration: targetDuration,
+            useAlpha,
+            sandboxIframe,
+            onProgress: (frame, total, pct) => {
+              setBulkTsxQueue(prev => prev.map(it => it.id === currentItem.id ? {
+                ...it,
+                progressFrame: frame,
+                progressPercent: pct
+              } : it));
+              setBulkRenderProgressText(
+                `[${i + 1}/${itemsToProcess.length}] ${currentItem.name}: Frame ${frame}/${total} (${pct}%) • Client-Side (Cloudflare Ready)`
+              );
+            },
+            isAborted: () => bulkRenderAbortRef.current,
+          });
+
+          const ext = clientResult.extension;
+          const cleanBaseName = getCleanPopovFilename(currentItem.title || currentItem.name).replace(/\.tsx$/i, '');
+          const finalVideoFileName = `${cleanBaseName}.${ext}`;
+          const sizeMB = (Number(clientResult.sizeBytes || 0) / (1024 * 1024)).toFixed(2);
+          const downloadUrl = clientResult.url;
+
+          if (bulkAutoDownloadVideos) {
+            try {
+              await saveBinaryVideoToMotionBackgroundsFolder(finalVideoFileName, clientResult.blob);
+            } catch (e) {}
+            const a = document.createElement('a');
+            a.href = clientResult.url;
+            a.download = finalVideoFileName;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+          }
+
+          const date = new Date();
+          const formattedDate = date.toLocaleDateString('id-ID', { hour: '2-digit', minute: '2-digit' });
+          const newRecord: SavedFileHistoryItem = {
+            name: finalVideoFileName,
+            workspace: `${currentItem.title} (Browser ${ext.toUpperCase()})`,
+            time: formattedDate,
+            size: `${sizeMB} MB`,
+            type: 'video',
+          };
+          setSavedFilesHistory(prev => {
+            const updated = [newRecord, ...prev.slice(0, 14)];
+            localStorage.setItem('vremotion_saved_history_v3', JSON.stringify(updated));
+            return updated;
+          });
+
+          updateAndPersistBulkQueue(prev => prev.map(it => it.id === currentItem.id ? {
+            ...it,
+            status: 'completed',
+            progressFrame: totalFrames,
+            progressPercent: 100,
+            renderedVideo: {
+              fileName: finalVideoFileName,
+              downloadUrl,
+              sizeMB: `${sizeMB} MB`,
+              codecLabel: `Browser ${ext.toUpperCase()}`,
+              hasAlpha: useAlpha,
+              extension: ext,
+              blobUrl: clientResult.url,
+            }
+          } : it));
+
+          continue;
+        }
+
+        // 1. Start FFmpeg render session (Fullstack Node.js server)
+        const kwData = generatePopovKeywords(currentItem.title || currentItem.name);
+        const startResp = await fetch('/api/render/start', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            codec: bulkRenderCodec,
+            alpha: useAlpha,
+            fps: targetFps,
+            width: targetW,
+            height: targetH,
+            title: currentItem.title || currentItem.name,
+            keywords: kwData.all,
+            inputFormat: frameInputFormat,
+          }),
+        });
+
+        if (!startResp.ok) {
+          const errJson = await startResp.json().catch(() => ({}));
+          throw new Error(errJson.error || 'Gagal memulai sesi render FFmpeg di server.');
+        }
+
+        const startData = await startResp.json();
+        sessionId = startData.sessionId;
+        bulkRenderActiveSessionRef.current = sessionId;
 
         sandboxIframe.style.width = `${targetW}px`;
         sandboxIframe.style.height = `${targetH}px`;
@@ -4258,6 +4346,74 @@ const App: React.FC = () => {
     let sessionId = '';
 
     try {
+      // Prepare dedicated offscreen render sandbox iframe at target resolution first
+      setRenderStatusText('Memuat komposisi & font di kanvas render...');
+      const renderHtml = injectInteractiveControls(
+        ensurePreviewHtmlResolution(previewHtmlCode, targetW, targetH, fps, duration),
+        effectiveBgForRender
+      );
+
+      const sandboxIframe = renderSandboxIframeRef.current;
+      if (!sandboxIframe) {
+        throw new Error('Elemen sandbox render tidak tersedia.');
+      }
+
+      // Cek apakah server FFmpeg tersedia (jika di Cloudflare Pages, gunakan browser recorder)
+      const isServerUp = await isServerRenderAvailable();
+
+      if (!isServerUp) {
+        setRenderStatusText('Menjalankan Browser Video Recorder (Cloudflare Mode)...');
+        const clientResult = await renderCompositionInBrowser({
+          renderHtml,
+          width: targetW,
+          height: targetH,
+          fps,
+          duration,
+          useAlpha,
+          sandboxIframe,
+          onProgress: (frame, total, pct) => {
+            setRenderCurrentFrame(frame);
+            setRenderStatusText(`Merender Frame ${frame} / ${total} (${pct}%) • Browser Recorder [Cloudflare Mode]`);
+          },
+          isAborted: () => renderAbortRef.current,
+        });
+
+        const ext = clientResult.extension;
+        const cleanBaseName = getCleanPopovFilename(workspaceName || 'Motion Background').replace(/\.tsx$/i, '');
+        const finalVideoFileName = `${cleanBaseName}.${ext}`;
+        const sizeMB = (Number(clientResult.sizeBytes || 0) / (1024 * 1024)).toFixed(2);
+
+        await saveBinaryVideoToMotionBackgroundsFolder(finalVideoFileName, clientResult.blob);
+
+        const date = new Date();
+        const formattedDate = date.toLocaleDateString('id-ID', { hour: '2-digit', minute: '2-digit' });
+        const newRecord: SavedFileHistoryItem = {
+          name: finalVideoFileName,
+          workspace: `${workspaceName || 'Motion Background'} (Browser ${ext.toUpperCase()})`,
+          time: formattedDate,
+          size: `${sizeMB} MB`,
+          type: 'video',
+        };
+        setSavedFilesHistory(prev => {
+          const updated = [newRecord, ...prev.slice(0, 14)];
+          localStorage.setItem('vremotion_saved_history_v3', JSON.stringify(updated));
+          return updated;
+        });
+
+        setRenderedVideoResult({
+          downloadUrl: clientResult.url,
+          fileName: finalVideoFileName,
+          sizeMB: `${sizeMB} MB`,
+          codecLabel: `Browser ${ext.toUpperCase()}`,
+          hasAlpha: useAlpha,
+          extension: ext,
+          blobUrl: clientResult.url,
+        });
+
+        setRenderStatusText(`Selesai! Video ${finalVideoFileName} (${sizeMB} MB) berhasil dirender langsung di browser.`);
+        return;
+      }
+
       setRenderStatusText(`Menyiapkan sesi FFmpeg (${codecLabel} • Muted)...`);
       const kwData = generatePopovKeywords(workspaceName || 'Motion Background');
 
@@ -4284,18 +4440,6 @@ const App: React.FC = () => {
       const startData = await startResp.json();
       sessionId = startData.sessionId;
       activeRenderSessionIdRef.current = sessionId;
-
-      // Prepare dedicated offscreen render sandbox iframe at target resolution
-      setRenderStatusText('Memuat komposisi & font di kanvas render...');
-      const renderHtml = injectInteractiveControls(
-        ensurePreviewHtmlResolution(previewHtmlCode, targetW, targetH, fps, duration),
-        effectiveBgForRender
-      );
-
-      const sandboxIframe = renderSandboxIframeRef.current;
-      if (!sandboxIframe) {
-        throw new Error('Elemen sandbox render tidak tersedia.');
-      }
 
       sandboxIframe.style.width = `${targetW}px`;
       sandboxIframe.style.height = `${targetH}px`;
@@ -5916,6 +6060,31 @@ Gunakan arah gerakan, gaya visual, atau orkestrasi partikel/elemen yang unik. Pa
             </div>
           )}
           
+          {/* AI Provider & API Keys Modal Button */}
+          <button
+            type="button"
+            onClick={() => setIsAiSettingsModalOpen(true)}
+            className="flex items-center gap-1.5 px-2.5 py-1.5 sm:px-3 sm:py-2 rounded-lg text-[11px] sm:text-xs font-bold transition-all border shadow-2xs bg-zinc-900 hover:bg-zinc-800 border-zinc-700 hover:border-amber-500/80 text-zinc-200 hover:text-amber-300 cursor-pointer shrink-0"
+            title="Pengaturan AI Provider, Bulk API Keys Gemini, OpenRouter (Claude 3.5), atau 9Router (Cloudflare Ready)"
+          >
+            <Key className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+            <span className="hidden sm:inline">AI Provider</span>
+            <span className="sm:hidden">AI</span>
+            <span className={`text-[8px] font-black px-1.5 py-0.2 rounded uppercase ${
+              aiSettings.activeProvider === 'openrouter'
+                ? 'bg-emerald-500 text-zinc-950'
+                : aiSettings.activeProvider === '9router'
+                  ? 'bg-sky-500 text-zinc-950'
+                  : 'bg-amber-500 text-zinc-950'
+            }`}>
+              {aiSettings.activeProvider === 'openrouter'
+                ? 'OpenRouter'
+                : aiSettings.activeProvider === '9router'
+                  ? '9Router'
+                  : 'Gemini'}
+            </span>
+          </button>
+
           {/* Hidden File Input untuk Import TSX dari PC (Bisa Multi File / Bulk) */}
           <input
             ref={importTsxFileInputRef}
@@ -9322,7 +9491,7 @@ Gunakan arah gerakan, gaya visual, atau orkestrasi partikel/elemen yang unik. Pa
                     </a>
                   </div>
 
-                  {renderedVideoResult.blobUrl && renderedVideoResult.extension === 'mp4' && (
+                  {renderedVideoResult.blobUrl && (renderedVideoResult.extension === 'mp4' || renderedVideoResult.extension === 'webm') && (
                     <div className="rounded-lg overflow-hidden border border-zinc-800 bg-black max-h-48 flex items-center justify-center">
                       <video
                         src={renderedVideoResult.blobUrl}
@@ -9955,6 +10124,15 @@ Gunakan arah gerakan, gaya visual, atau orkestrasi partikel/elemen yang unik. Pa
           </div>
         </div>
       )}
+
+      {/* AI Provider & API Keys Modal (Gemini Bulk, OpenRouter, 9Router) */}
+      <AISettingsModal
+        isOpen={isAiSettingsModalOpen}
+        onClose={() => setIsAiSettingsModalOpen(false)}
+        onSettingsSaved={(newSettings) => {
+          setAiSettings(newSettings);
+        }}
+      />
     </div>
   );
 };

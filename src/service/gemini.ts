@@ -1,16 +1,49 @@
 import { GoogleGenAI, Type, ThinkingLevel } from "@google/genai";
 import { transform as sucraseTransform } from "sucrase";
+import {
+  getAISettings,
+  parseBulkGeminiKeys,
+  saveAISettings,
+  executeOpenAICompatibleChat,
+  AISettings,
+} from "./aiProviders";
 
 let aiClient: GoogleGenAI | null = null;
+let currentClientApiKey: string = "";
+
+export function getEffectiveGeminiApiKey(): string {
+  const settings = getAISettings();
+  const bulkKeys = parseBulkGeminiKeys(settings.geminiKeysText);
+  if (bulkKeys.length > 0) {
+    const idx = settings.activeGeminiKeyIndex % bulkKeys.length;
+    return bulkKeys[idx];
+  }
+  return (import.meta as any).env?.VITE_GEMINI_API_KEY || (typeof process !== "undefined" ? process.env.GEMINI_API_KEY : "") || "";
+}
+
+export function tryRotateGeminiKey(): boolean {
+  const settings = getAISettings();
+  const bulkKeys = parseBulkGeminiKeys(settings.geminiKeysText);
+  if (bulkKeys.length > 1) {
+    const nextIdx = (settings.activeGeminiKeyIndex + 1) % bulkKeys.length;
+    saveAISettings({ activeGeminiKeyIndex: nextIdx });
+    aiClient = null;
+    currentClientApiKey = "";
+    console.warn(`[Auto Key Failover] Beralih ke Gemini API Key ke-${nextIdx + 1} dari ${bulkKeys.length}`);
+    return true;
+  }
+  return false;
+}
 
 function getGeminiClient(): GoogleGenAI {
-  if (!aiClient) {
-    const apiKey = (import.meta as any).env?.VITE_GEMINI_API_KEY || (typeof process !== "undefined" ? process.env.GEMINI_API_KEY : "") || "";
-    if (!apiKey) {
-      throw new Error(
-        "GEMINI_API_KEY is missing. Please configure it in the Secrets panel."
-      );
-    }
+  const apiKey = getEffectiveGeminiApiKey();
+  if (!apiKey) {
+    throw new Error(
+      "GEMINI_API_KEY belum diatur. Silakan masukkan API Key Gemini di menu Pengaturan AI & Model, atau pilih provider OpenRouter / 9Router."
+    );
+  }
+  if (!aiClient || currentClientApiKey !== apiKey) {
+    currentClientApiKey = apiKey;
     aiClient = new GoogleGenAI({
       apiKey,
       httpOptions: {
@@ -1152,8 +1185,6 @@ export async function generateAnimationService(
   const resolutionLabel = targetWidth >= 3840 || targetHeight >= 3840 ? "4K" : "2K";
   const totalFrames = duration * fps;
 
-  const ai = getGeminiClient();
-
   const isComplex3D = /three(\.js)?|webgl|mesh|geometry|shader|glsl|simulation|simulasi|physics|fisika|cloth|kain|satin|silk|sutra|fabric|flag|bendera|fluid|fluida|particle|partikel|wave|gelombang|gravity|gravitasi|spring|pendulum|collision|rigid/i.test(brief);
 
   const configRequirements: string[] = [];
@@ -1997,6 +2028,52 @@ Kode TSX ("code") dan HTML preview ("previewHtml") WAJIB LENGKAP, TEBAL, BEBAS S
     }
   };
 
+  const aiSettings = getAISettings();
+
+  // 1. Support OpenRouter & 9Router Providers
+  if (aiSettings.activeProvider === 'openrouter' || aiSettings.activeProvider === '9router') {
+    const is9Router = aiSettings.activeProvider === '9router';
+    const baseUrl = is9Router ? (aiSettings.nineRouterBaseUrl || 'https://api.9router.com/v1') : 'https://openrouter.ai/api/v1';
+    const apiKey = is9Router ? aiSettings.nineRouterKey : aiSettings.openrouterKey;
+    const model = is9Router ? aiSettings.nineRouterSelectedModel : aiSettings.openrouterSelectedModel;
+    const providerName = is9Router ? '9Router' : 'OpenRouter';
+
+    if (!apiKey || !apiKey.trim()) {
+      throw new Error(`API Key untuk ${providerName} belum dimasukkan. Silakan buka menu Pengaturan AI & Model untuk memasukkan API Key.`);
+    }
+
+    const combinedPrompt = `${prompt}\n\n${systemInstructionText}\n\nIMPORTANT: Response MUST be a JSON object containing "code" (Remotion TSX), "previewHtml" (standalone HTML preview), "suggestedTitle", and "detectedObjects".`;
+
+    const rawResponse = await executeOpenAICompatibleChat({
+      baseUrl,
+      apiKey,
+      model: model || (is9Router ? 'claude-3-5-sonnet' : 'anthropic/claude-3.5-sonnet'),
+      systemInstruction: systemInstructionText,
+      userPrompt: combinedPrompt,
+      temperature: targetTemperature,
+      providerName,
+    });
+
+    const parsed = cleanAndParseJson(rawResponse);
+    if (parsed && (parsed.code || parsed.previewHtml)) {
+      if (parsed.code) parsed.code = healTsxSyntaxErrors(parsed.code);
+      if (parsed.previewHtml) parsed.previewHtml = healHtmlPreviewSyntax(parsed.previewHtml);
+      parsed.suggestedTitle = formatFizkesPopovTitle(parsed.suggestedTitle, {
+        brief,
+        style: iconStyle,
+        is3D: isPremium3D,
+      });
+      parsed.popovKeywords = generatePopovKeywords(parsed.suggestedTitle, {
+        brief,
+        objects: parsed.detectedObjects,
+      });
+      parsed.suggestedKeywords = parsed.popovKeywords.all;
+      return parsed;
+    }
+    throw new Error(`Gagal menghasilkan kode valid dari provider ${providerName}.`);
+  }
+
+  // 2. Default Gemini with Auto-Key Failover Rotation
   const candidateModels = [
     "gemini-3.8-flash",       // Primer: gemini-3.8-flash
     "gemini-3.7-flash",       // Fallback 1: gemini-3.7-flash
@@ -2013,7 +2090,8 @@ Kode TSX ("code") dan HTML preview ("previewHtml") WAJIB LENGKAP, TEBAL, BEBAS S
         await new Promise((res) => setTimeout(res, 1500));
       }
 
-      const response = await ai.models.generateContent({
+      const activeAi = getGeminiClient();
+      const response = await activeAi.models.generateContent({
         model: currentModel,
         contents: { parts: contents },
         config: {
@@ -2111,7 +2189,6 @@ export async function applyVariationService(
     bgDirective = "11. LATAR BELAKANG PUTIH: Jadikan background color #ffffff murni pada TSX dan HTML preview.";
   }
 
-  const ai = getGeminiClient();
   const sanitizedTSXInput = sanitizeRemotionConstants(generatedTSXCode);
 
   const prompt = `Anda adalah Spesialis Pembuat Kode Video Remotion TSX & WebGL Precision Code Surgeon.
@@ -2189,6 +2266,55 @@ Output harus berupa JSON dengan struktur:
   "suggestedTitle": "Adobe Stock Title sesuai formula Fizkes & Andrey Popov ([Subject] + [Gerund] + [Object] + [Location] + [Concept]), STRICTLY 88 to 130 characters"
 }`;
 
+  const aiSettings = getAISettings();
+
+  // 1. Support OpenRouter & 9Router Providers
+  if (aiSettings.activeProvider === 'openrouter' || aiSettings.activeProvider === '9router') {
+    const is9Router = aiSettings.activeProvider === '9router';
+    const baseUrl = is9Router ? (aiSettings.nineRouterBaseUrl || 'https://api.9router.com/v1') : 'https://openrouter.ai/api/v1';
+    const apiKey = is9Router ? aiSettings.nineRouterKey : aiSettings.openrouterKey;
+    const model = is9Router ? aiSettings.nineRouterSelectedModel : aiSettings.openrouterSelectedModel;
+    const providerName = is9Router ? '9Router' : 'OpenRouter';
+
+    if (!apiKey || !apiKey.trim()) {
+      throw new Error(`API Key untuk ${providerName} belum dimasukkan. Silakan buka menu Pengaturan AI & Model.`);
+    }
+
+    const surgeonInstruction = "You are a Precision Code Surgeon for Remotion TSX and WebGL/Canvas visual code. Modify ONLY targeted parts in-place. Output MUST be valid JSON with keys 'code', 'previewHtml', 'suggestedTitle'.";
+    const rawResponse = await executeOpenAICompatibleChat({
+      baseUrl,
+      apiKey,
+      model: model || (is9Router ? 'claude-3-5-sonnet' : 'anthropic/claude-3.5-sonnet'),
+      systemInstruction: surgeonInstruction,
+      userPrompt: prompt,
+      temperature: 0.2,
+      providerName,
+    });
+
+    let cleaned = (rawResponse || "").trim();
+    if (cleaned.startsWith("```json")) {
+      cleaned = cleaned.replace(/^```json\s*/, "").replace(/\s*```$/, "");
+    } else if (cleaned.startsWith("```")) {
+      cleaned = cleaned.replace(/^```\s*/, "").replace(/\s*```$/, "");
+    }
+    const parsed = JSON.parse(cleaned) as ApplyVariationResponse;
+    if (parsed) {
+      if (parsed.code) parsed.code = healTsxSyntaxErrors(parsed.code);
+      if (parsed.previewHtml) parsed.previewHtml = healHtmlPreviewSyntax(parsed.previewHtml);
+      parsed.suggestedTitle = formatFizkesPopovTitle(parsed.suggestedTitle, {
+        brief: variationPrompt,
+        is3D: true,
+      });
+      parsed.popovKeywords = generatePopovKeywords(parsed.suggestedTitle, {
+        brief: variationPrompt,
+      });
+      parsed.suggestedKeywords = parsed.popovKeywords.all;
+      return parsed;
+    }
+    throw new Error(`Gagal memodifikasi animasi dari provider ${providerName}.`);
+  }
+
+  // 2. Default Gemini
   const candidateModels = [
     "gemini-3.8-flash",       // Primer: gemini-3.8-flash
     "gemini-3.7-flash",       // Fallback 1: gemini-3.7-flash
@@ -2204,7 +2330,8 @@ Output harus berupa JSON dengan struktur:
         await new Promise((res) => setTimeout(res, 1500));
       }
 
-      const response = await ai.models.generateContent({
+      const activeAi = getGeminiClient();
+      const response = await activeAi.models.generateContent({
         model: currentModel,
         contents: prompt,
         config: {
@@ -2761,7 +2888,6 @@ export async function generatePreviewFromTsxService(
     bgOverride,
   } = params;
 
-  const ai = getGeminiClient();
   const sanitizedTSX = sanitizeRemotionConstants(tsxCode);
 
   const prompt = `Anda adalah Spesialis Kompilator Remotion TSX ke Standalone HTML & Vanilla JS Animation.
@@ -2792,6 +2918,37 @@ Berikan output JSON dengan format:
   "detectedObjects": ["Objek 1", "Objek 2"]
 }`;
 
+  const aiSettings = getAISettings();
+  if (aiSettings.activeProvider === 'openrouter' || aiSettings.activeProvider === '9router') {
+    const is9Router = aiSettings.activeProvider === '9router';
+    const baseUrl = is9Router ? (aiSettings.nineRouterBaseUrl || 'https://api.9router.com/v1') : 'https://openrouter.ai/api/v1';
+    const apiKey = is9Router ? aiSettings.nineRouterKey : aiSettings.openrouterKey;
+    const model = is9Router ? aiSettings.nineRouterSelectedModel : aiSettings.openrouterSelectedModel;
+    const providerName = is9Router ? '9Router' : 'OpenRouter';
+
+    const rawResponse = await executeOpenAICompatibleChat({
+      baseUrl,
+      apiKey,
+      model: model || (is9Router ? 'claude-3-5-sonnet' : 'anthropic/claude-3.5-sonnet'),
+      systemInstruction: "You are a Remotion TSX to Standalone HTML & Canvas/SVG preview compiler. Generate ultra-clean, 60fps standalone HTML previews that replicate the Remotion composition visually with window.draw(progress, frame).",
+      userPrompt: prompt,
+      providerName,
+    });
+
+    let cleaned = (rawResponse || "{}").trim();
+    if (cleaned.startsWith("```json")) {
+      cleaned = cleaned.replace(/^```json\s*/, "").replace(/\s*```$/, "");
+    } else if (cleaned.startsWith("```")) {
+      cleaned = cleaned.replace(/^```\s*/, "").replace(/\s*```$/, "");
+    }
+    const parsed = JSON.parse(cleaned) as GeneratePreviewFromTsxResponse;
+    if (parsed.previewHtml) {
+      parsed.previewHtml = healHtmlPreviewSyntax(parsed.previewHtml);
+      return parsed;
+    }
+    throw new Error(`Model ${model} dari ${providerName} tidak menghasilkan previewHtml`);
+  }
+
   const candidateModels = [
     "gemini-3.8-flash",
     "gemini-3.7-flash",
@@ -2801,7 +2958,8 @@ Berikan output JSON dengan format:
   for (let mIdx = 0; mIdx < candidateModels.length; mIdx++) {
     const currentModel = candidateModels[mIdx];
     try {
-      const response = await ai.models.generateContent({
+      const activeAi = getGeminiClient();
+      const response = await activeAi.models.generateContent({
         model: currentModel,
         contents: prompt,
         config: {
