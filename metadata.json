@@ -1,0 +1,8 @@
+{
+  "name": "Remix Remix Remix Remotion Code Pro - V26.10.07",
+  "description": "Generate, modify, and preview Remotion TSX compositions and interactive HTML animations with Gemini AI.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
