@@ -309,7 +309,9 @@ export async function clearBulkQueueTask(): Promise<void> {
   } catch (e) {
     // fallback
   }
-  localStorage.removeItem('vremotion_active_bulk_job');
+  try {
+    localStorage.removeItem('vremotion_active_bulk_job');
+  } catch (e) {}
 }
 
 export async function saveActiveDraft(draft: DraftData): Promise<void> {
@@ -360,7 +362,9 @@ export async function clearActiveDraft(): Promise<void> {
   } catch (e) {
     // fallback
   }
-  localStorage.removeItem('vremotion_active_draft_v2');
+  try {
+    localStorage.removeItem('vremotion_active_draft_v2');
+  } catch (e) {}
 }
 
 export async function saveBulkTsxQueue(items: BulkTsxItem[]): Promise<void> {
@@ -421,7 +425,9 @@ export async function clearBulkTsxQueue(): Promise<void> {
   } catch (e) {
     // fallback
   }
-  localStorage.removeItem('vremotion_bulk_tsx_queue_v1');
+  try {
+    localStorage.removeItem('vremotion_bulk_tsx_queue_v1');
+  } catch (e) {}
 }
 
 export async function saveTsxToStoredLibrary(record: Omit<StoredTsxRecord, 'id' | 'savedAt'> & { id?: string }): Promise<StoredTsxRecord> {

@@ -2985,26 +2985,26 @@ const App: React.FC = () => {
   // Cache history, active draft session, and workspace on startup (Self-Healing Recovery)
   useEffect(() => {
     // 1. Load exported history
-    const cachedHistory = localStorage.getItem('vremotion_saved_history_v3');
-    if (cachedHistory) {
-      try {
+    try {
+      const cachedHistory = localStorage.getItem('vremotion_saved_history_v3');
+      if (cachedHistory) {
         const parsed = JSON.parse(cachedHistory);
         // Cap to max 10 records for memory efficiency
         setSavedFilesHistory(Array.isArray(parsed) ? parsed.slice(0, 10) : []);
-      } catch (e) {
-        console.error("Gagal memuat histori ekspor:", e);
       }
+    } catch (e) {
+      console.warn("Gagal memuat histori ekspor:", e);
     }
 
     // 2. Load active draft (prevents auto-refresh loss)
     getActiveDraft().then((draft) => {
       if (!draft) {
-        const cachedDraft = localStorage.getItem('vremotion_active_draft_v2');
-        if (cachedDraft) {
-          try {
+        try {
+          const cachedDraft = localStorage.getItem('vremotion_active_draft_v2');
+          if (cachedDraft) {
             draft = JSON.parse(cachedDraft);
-          } catch (e) {}
-        }
+          }
+        } catch (e) {}
       }
       if (draft) {
         const draftDur = draft.duration || 10;
@@ -3057,10 +3057,12 @@ const App: React.FC = () => {
         if (draft.zoom !== undefined) setZoom(draft.zoom);
         if (draft.savedAt) setDraftSavedAt(draft.savedAt);
       } else {
-        const cachedWorkspace = localStorage.getItem('vremotion_workspace_name');
-        if (cachedWorkspace) {
-          setWorkspaceName(cachedWorkspace);
-        }
+        try {
+          const cachedWorkspace = localStorage.getItem('vremotion_workspace_name');
+          if (cachedWorkspace) {
+            setWorkspaceName(cachedWorkspace);
+          }
+        } catch (e) {}
       }
     }).catch(err => console.error("Gagal memuat draf tersimpan:", err));
 
