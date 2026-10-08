@@ -31,6 +31,7 @@ import {
   saveAISettings,
   parseBulkGeminiKeys,
   validateBulkGeminiKeys,
+  scanGeminiModels,
   scanOpenRouterModels,
   scanNineRouterModels,
   maskApiKey,
@@ -56,6 +57,18 @@ export const AISettingsModal: React.FC<AISettingsModalProps> = ({
   const [geminiValidationResults, setGeminiValidationResults] = useState<KeyValidationResult[]>([]);
   const [isValidatingGemini, setIsValidatingGemini] = useState(false);
   const [geminiActiveIdx, setGeminiActiveIdx] = useState(settings.activeGeminiKeyIndex || 0);
+  const [isScanningGemini, setIsScanningGemini] = useState(false);
+  const [geminiScanMsg, setGeminiScanMsg] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+  const [geminiFilter, setGeminiFilter] = useState('');
+  const [customGeminiInput, setCustomGeminiInput] = useState('');
+  const [selectedGeminiModel, setSelectedGeminiModel] = useState(
+    settings.geminiSelectedModel || 'gemini-2.5-flash'
+  );
+  const [scannedGeminiModels, setScannedGeminiModels] = useState<ScannedModelInfo[]>(
+    settings.geminiScannedModels && settings.geminiScannedModels.length > 0
+      ? settings.geminiScannedModels
+      : (DEFAULT_AI_SETTINGS.geminiScannedModels || [])
+  );
 
   // OpenRouter state
   const [openrouterKey, setOpenrouterKey] = useState(settings.openrouterKey || '');
@@ -87,18 +100,80 @@ export const AISettingsModal: React.FC<AISettingsModalProps> = ({
       setActiveTab(current.activeProvider);
       setGeminiKeysText(current.geminiKeysText || '');
       setGeminiActiveIdx(current.activeGeminiKeyIndex || 0);
+      setSelectedGeminiModel(current.geminiSelectedModel || 'gemini-2.5-flash');
+      setScannedGeminiModels(
+        current.geminiScannedModels && current.geminiScannedModels.length > 0
+          ? current.geminiScannedModels
+          : (DEFAULT_AI_SETTINGS.geminiScannedModels || [])
+      );
       setOpenrouterKey(current.openrouterKey || '');
       setSelectedOpenRouterModel(current.openrouterSelectedModel || 'anthropic/claude-3.5-sonnet');
       setNineRouterKey(current.nineRouterKey || '');
       setNineRouterBaseUrl(current.nineRouterBaseUrl || 'https://api.9router.com/v1');
       setSelectedNineRouterModel(current.nineRouterSelectedModel || 'claude-3-5-sonnet');
       setSaveSuccessMsg(false);
+      setGeminiScanMsg(null);
     }
   }, [isOpen]);
 
   if (!isOpen) return null;
 
   const parsedGeminiKeys = parseBulkGeminiKeys(geminiKeysText);
+
+  // Scan Gemini Models
+  const handleScanGemini = async () => {
+    const envKey = (import.meta as any).env?.VITE_GEMINI_API_KEY || '';
+    if (parsedGeminiKeys.length === 0 && !envKey) {
+      setGeminiScanMsg({ type: 'error', text: 'Masukkan minimal satu API Key Gemini pada textarea di atas untuk memindai model resmi.' });
+      return;
+    }
+
+    setIsScanningGemini(true);
+    setGeminiScanMsg(null);
+    try {
+      const keysToTry = parsedGeminiKeys.length > 0
+        ? [parsedGeminiKeys[geminiActiveIdx] || parsedGeminiKeys[0], ...parsedGeminiKeys.filter((_, idx) => idx !== geminiActiveIdx)]
+        : [envKey];
+
+      let lastError = '';
+      let successfulRes: any = null;
+
+      for (const k of keysToTry) {
+        if (!k) continue;
+        const res = await scanGeminiModels(k);
+        if (res.valid && res.models.length > 0) {
+          successfulRes = res;
+          break;
+        } else {
+          lastError = res.error || lastError;
+        }
+      }
+
+      if (successfulRes && successfulRes.models.length > 0) {
+        setScannedGeminiModels(successfulRes.models);
+        setSettings(prev => ({
+          ...prev,
+          geminiScannedModels: successfulRes.models
+        }));
+        setGeminiScanMsg({
+          type: 'success',
+          text: successfulRes.keyStatusText || `Berhasil memindai ${successfulRes.models.length} model resmi Google Gemini!`
+        });
+      } else {
+        setGeminiScanMsg({
+          type: 'error',
+          text: lastError || 'Gagal memindai model dari Google Gemini. Pastikan API Key aktif dan memiliki akses.'
+        });
+      }
+    } catch (e: any) {
+      setGeminiScanMsg({
+        type: 'error',
+        text: e.message || 'Koneksi gagal ke Google Gemini.'
+      });
+    } finally {
+      setIsScanningGemini(false);
+    }
+  };
 
   // Validate Bulk Gemini Keys
   const handleValidateGemini = async () => {
@@ -194,6 +269,8 @@ export const AISettingsModal: React.FC<AISettingsModalProps> = ({
       activeProvider: activeTab,
       geminiKeysText,
       activeGeminiKeyIndex: geminiActiveIdx,
+      geminiSelectedModel: selectedGeminiModel,
+      geminiScannedModels: scannedGeminiModels,
       openrouterKey,
       openrouterSelectedModel: selectedOpenRouterModel,
       nineRouterKey,
@@ -212,6 +289,13 @@ export const AISettingsModal: React.FC<AISettingsModalProps> = ({
       onClose();
     }, 900);
   };
+
+  // Gemini models filtered list
+  const filteredGeminiModels = (scannedGeminiModels.length > 0 ? scannedGeminiModels : (DEFAULT_AI_SETTINGS.geminiScannedModels || [])).filter(m => {
+    if (!geminiFilter.trim()) return true;
+    const q = geminiFilter.toLowerCase();
+    return m.name.toLowerCase().includes(q) || m.id.toLowerCase().includes(q) || (m.description && m.description.toLowerCase().includes(q));
+  });
 
   // OpenRouter models filtered list
   const filteredOpenRouterModels = settings.openrouterScannedModels.filter(m => {
@@ -375,23 +459,88 @@ export const AISettingsModal: React.FC<AISettingsModalProps> = ({
                   className="w-full bg-zinc-950 border border-zinc-800 focus:border-amber-500 rounded-xl px-3.5 py-2.5 text-xs font-mono text-zinc-200 placeholder:text-zinc-600 focus:outline-none transition-colors"
                 />
 
-                <div className="flex items-center justify-between mt-2">
+                <div className="flex flex-wrap items-center justify-between gap-2 mt-2">
                   <span className="text-[11px] text-zinc-400">
-                    * Jika kosong, aplikasi akan menggunakan API Key dari environment jika tersedia.
+                    * Otomatis merotasi key saat limit 429 atau kuota habis tanpa cloud fallback macet.
                   </span>
-                  <button
-                    type="button"
-                    onClick={handleValidateGemini}
-                    disabled={isValidatingGemini || parsedGeminiKeys.length === 0}
-                    className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs font-bold border border-zinc-700 transition-colors cursor-pointer disabled:opacity-50"
-                  >
-                    {isValidatingGemini ? (
-                      <Loader2 className="w-3.5 h-3.5 animate-spin text-amber-400" />
-                    ) : (
-                      <RefreshCw className="w-3.5 h-3.5 text-amber-400" />
-                    )}
-                    <span>Cek Validitas {parsedGeminiKeys.length} Key</span>
-                  </button>
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={handleValidateGemini}
+                      disabled={isValidatingGemini || parsedGeminiKeys.length === 0}
+                      className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-xs font-bold border border-zinc-700 transition-colors cursor-pointer disabled:opacity-50"
+                    >
+                      {isValidatingGemini ? (
+                        <Loader2 className="w-3.5 h-3.5 animate-spin text-amber-400" />
+                      ) : (
+                        <RefreshCw className="w-3.5 h-3.5 text-amber-400" />
+                      )}
+                      <span>Cek {parsedGeminiKeys.length} Key</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleScanGemini}
+                      disabled={isScanningGemini}
+                      className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-400 text-zinc-950 text-xs font-black transition-all cursor-pointer disabled:opacity-50 shadow-xs"
+                    >
+                      {isScanningGemini ? (
+                        <Loader2 className="w-3.5 h-3.5 animate-spin text-zinc-950" />
+                      ) : (
+                        <Search className="w-3.5 h-3.5 text-zinc-950" />
+                      )}
+                      <span>Scan Model Google</span>
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              {/* SCAN STATUS MESSAGE */}
+              {geminiScanMsg && (
+                <div
+                  className={`p-3 rounded-xl border text-xs flex items-center gap-2 ${
+                    geminiScanMsg.type === 'success'
+                      ? 'bg-amber-950/60 border-amber-800 text-amber-200'
+                      : 'bg-rose-950/60 border-rose-800 text-rose-200'
+                  }`}
+                >
+                  {geminiScanMsg.type === 'success' ? (
+                    <CheckCircle className="w-4 h-4 text-amber-400 shrink-0" />
+                  ) : (
+                    <AlertCircle className="w-4 h-4 text-rose-400 shrink-0" />
+                  )}
+                  <span>{geminiScanMsg.text}</span>
+                </div>
+              )}
+
+              {/* ACTIVE SELECTED MODEL CARD */}
+              <div className="bg-zinc-950 p-3.5 rounded-xl border border-zinc-800 flex items-center justify-between">
+                <div>
+                  <span className="text-[10px] text-zinc-400 font-bold uppercase tracking-wider block">
+                    Model Google Gemini Aktif yang Dipilih:
+                  </span>
+                  <div className="flex items-center gap-2 mt-1">
+                    <span className="text-xs font-extrabold text-amber-400 font-mono">
+                      {selectedGeminiModel}
+                    </span>
+                    <span className="text-[9px] bg-teal-500/20 text-teal-300 font-black px-1.5 py-0.2 rounded border border-teal-500/30 flex items-center gap-0.5">
+                      <Eye className="w-2.5 h-2.5" />
+                      Multimodal / Vision Gambar ✓
+                    </span>
+                  </div>
+                </div>
+                <span className="text-[10px] bg-amber-500/20 text-amber-300 font-black px-2 py-0.5 rounded-full border border-amber-500/30">
+                  Aktif Digunakan ✓
+                </span>
+              </div>
+
+              {/* ROTATING KEYS & CLOUD RESILIENCE BANNER */}
+              <div className="p-3 rounded-xl bg-amber-950/30 border border-amber-800/40 text-[11px] text-amber-200/90 flex items-start gap-2.5">
+                <Zap className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+                <div>
+                  <strong className="text-amber-300 font-bold">Rotasi API Key Otomatis (Bebas Macet di Cloud):</strong>
+                  <p className="text-zinc-300 mt-0.5 leading-relaxed">
+                    Jika aplikasi dijalankan di Cloudflare Pages atau hosting cloud, sistem secara mandiri merotasi daftar API Key yang Anda masukkan ketika kuota/RPM habis (429). Anda bebas memilih model Gemini yang sudah di-scan di bawah ini.
+                  </p>
                 </div>
               </div>
 
@@ -433,6 +582,115 @@ export const AISettingsModal: React.FC<AISettingsModalProps> = ({
                   </div>
                 </div>
               )}
+
+              {/* CUSTOM MODEL INPUT */}
+              <div className="p-3 rounded-xl bg-zinc-950/80 border border-zinc-800 space-y-2">
+                <div className="flex items-center justify-between">
+                  <label className="text-xs font-bold text-zinc-300 flex items-center gap-1.5">
+                    <Sparkles className="w-3.5 h-3.5 text-amber-400" />
+                    <span>Ketik Model Kustom / Khusus Google Gemini:</span>
+                  </label>
+                  <span className="text-[10px] text-zinc-500">User bebas memilih model apapun</span>
+                </div>
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    value={customGeminiInput}
+                    onChange={(e) => setCustomGeminiInput(e.target.value)}
+                    placeholder="Contoh: gemini-2.5-flash, gemini-2.5-pro, gemini-2.0-flash, gemini-1.5-pro..."
+                    className="flex-1 bg-zinc-900 border border-zinc-800 rounded-lg px-3 py-1.5 text-xs text-zinc-200 font-mono placeholder:text-zinc-600 focus:outline-none focus:border-amber-500"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (customGeminiInput.trim()) {
+                        setSelectedGeminiModel(customGeminiInput.trim());
+                      }
+                    }}
+                    disabled={!customGeminiInput.trim()}
+                    className="px-3 py-1.5 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-amber-400 text-xs font-bold border border-zinc-700 transition-colors disabled:opacity-50 cursor-pointer"
+                  >
+                    Gunakan Model Ini
+                  </button>
+                </div>
+              </div>
+
+              {/* SEARCH & SCANNED GEMINI MODEL LIST */}
+              <div className="space-y-2">
+                <div className="flex items-center justify-between">
+                  <label className="text-xs font-bold text-zinc-300">
+                    Pilih Bebas Model Gemini Hasil Scan ({filteredGeminiModels.length}):
+                  </label>
+                  <div className="relative w-64">
+                    <input
+                      type="text"
+                      value={geminiFilter}
+                      onChange={(e) => setGeminiFilter(e.target.value)}
+                      placeholder="Cari model (flash, pro, 2.5, 2.0)..."
+                      className="w-full bg-zinc-950 border border-zinc-800 rounded-lg px-2.5 py-1 text-xs text-zinc-200 placeholder:text-zinc-600 focus:outline-none focus:border-amber-500"
+                    />
+                  </div>
+                </div>
+
+                <div className="space-y-2 max-h-60 overflow-y-auto pr-1">
+                  {filteredGeminiModels.map((m) => {
+                    const isSelected = selectedGeminiModel === m.id;
+                    return (
+                      <div
+                        key={m.id}
+                        onClick={() => setSelectedGeminiModel(m.id)}
+                        className={`p-3 rounded-xl border transition-all cursor-pointer flex items-center justify-between ${
+                          isSelected
+                            ? 'bg-amber-950/40 border-amber-500 shadow-xs'
+                            : 'bg-zinc-950/70 border-zinc-800 hover:border-zinc-700'
+                        }`}
+                      >
+                        <div className="space-y-1">
+                          <div className="flex items-center gap-1.5 flex-wrap">
+                            <span className="text-xs font-bold text-zinc-200">{m.name}</span>
+                            {m.isRecommended && (
+                              <span className="text-[9px] bg-amber-500/20 text-amber-300 px-1.5 py-0.2 rounded font-black border border-amber-500/30 flex items-center gap-1">
+                                <Star className="w-2.5 h-2.5 fill-current" />
+                                Rekomendasi
+                              </span>
+                            )}
+                            <span className="text-[9px] bg-teal-500/20 text-teal-300 px-1.5 py-0.2 rounded font-black border border-teal-500/30 flex items-center gap-0.5">
+                              <Eye className="w-2.5 h-2.5" />
+                              Vision / Gambar ✓
+                            </span>
+                            {m.contextLength && (
+                              <span className="text-[9px] bg-zinc-800 text-zinc-400 px-1.5 py-0.2 rounded font-mono border border-zinc-700">
+                                {(m.contextLength / 1000).toFixed(0)}k Tokens
+                              </span>
+                            )}
+                          </div>
+                          <span className="text-[11px] font-mono text-zinc-400 block">{m.id}</span>
+                          {m.description && (
+                            <p className="text-[10px] text-zinc-500 line-clamp-1">{m.description}</p>
+                          )}
+                        </div>
+
+                        <div className="text-right shrink-0 pl-3">
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setSelectedGeminiModel(m.id);
+                            }}
+                            className={`px-3 py-1 rounded-lg text-xs font-extrabold transition-all ${
+                              isSelected
+                                ? 'bg-amber-500 text-zinc-950 font-black'
+                                : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-300'
+                            }`}
+                          >
+                            {isSelected ? '✓ Dipilih' : 'Pilih Model'}
+                          </button>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
             </div>
           )}
 

@@ -36,6 +36,35 @@ export function tryRotateGeminiKey(): boolean {
   return false;
 }
 
+export function getCandidateGeminiModels(): string[] {
+  const settings = getAISettings();
+  const selected = settings.geminiSelectedModel?.trim();
+  const scanned = (settings.geminiScannedModels || []).map((m) => m.id.trim()).filter(Boolean);
+  const standardFallbacks = [
+    "gemini-2.5-flash",
+    "gemini-2.5-pro",
+    "gemini-2.0-flash",
+    "gemini-1.5-flash",
+    "gemini-1.5-pro",
+  ];
+
+  const candidateList: string[] = [];
+  if (selected) {
+    candidateList.push(selected);
+  }
+  for (const s of scanned) {
+    if (!candidateList.includes(s)) {
+      candidateList.push(s);
+    }
+  }
+  for (const f of standardFallbacks) {
+    if (!candidateList.includes(f)) {
+      candidateList.push(f);
+    }
+  }
+  return candidateList;
+}
+
 function getGeminiClient(): GoogleGenAI {
   const apiKey = getEffectiveGeminiApiKey();
   if (!apiKey) {
@@ -2097,68 +2126,101 @@ DILARANG KERAS MENGARANG BENTUK GEOMETRI SENDIRI yang berbeda dari gambar refere
     throw new Error(`Gagal menghasilkan kode valid dari provider ${providerName}.`);
   }
 
-  // 2. Default Gemini with Auto-Key Failover Rotation
-  const candidateModels = [
-    "gemini-3.8-flash",       // Primer: gemini-3.8-flash
-    "gemini-3.7-flash",       // Fallback 1: gemini-3.7-flash
-    "gemini-3.6-flash",       // Fallback 2: gemini-3.6-flash
-  ];
+  // 2. Default Gemini with User-Selected Model & Auto-Key Failover Rotation
+  const bulkKeys = parseBulkGeminiKeys(aiSettings.geminiKeysText);
+  const totalKeys = Math.max(1, bulkKeys.length);
+  const candidateModels = getCandidateGeminiModels();
 
   let lastError: any = null;
 
   for (let mIdx = 0; mIdx < candidateModels.length; mIdx++) {
     const currentModel = candidateModels[mIdx];
-    try {
-      if (mIdx > 0) {
-        console.warn(`[Fallback Active] Mencoba model fallback ke-${mIdx}: ${currentModel}`);
-        await new Promise((res) => setTimeout(res, 1500));
-      }
 
-      const activeAi = getGeminiClient();
-      const response = await activeAi.models.generateContent({
-        model: currentModel,
-        contents: { parts: contents },
-        config: {
+    for (let keyAttempt = 0; keyAttempt < totalKeys; keyAttempt++) {
+      try {
+        if (mIdx > 0 && keyAttempt === 0) {
+          console.warn(`[Fallback Model Active] Mencoba model fallback ke-${mIdx}: ${currentModel}`);
+          await new Promise((res) => setTimeout(res, 800));
+        }
+
+        const activeAi = getGeminiClient();
+        const supportsThinking = currentModel.includes("2.5") || currentModel.includes("thinking") || currentModel.includes("3.");
+        const requestConfig: any = {
           responseMimeType: "application/json",
           responseSchema: schemaConfig,
           systemInstruction: systemInstructionText,
           temperature: targetTemperature,
           maxOutputTokens: 65536,
-          thinkingConfig: {
+        };
+        if (supportsThinking) {
+          requestConfig.thinkingConfig = {
             thinkingLevel: ThinkingLevel.HIGH,
-          },
-        },
-      });
+          };
+        }
+        const response = await activeAi.models.generateContent({
+          model: currentModel,
+          contents: { parts: contents },
+          config: requestConfig,
+        });
 
-      const rawText = response.text?.trim() || "{}";
-      const parsed = cleanAndParseJson(rawText);
-      if (parsed && (parsed.code || parsed.previewHtml)) {
-        if (parsed.code) {
-          parsed.code = healTsxSyntaxErrors(parsed.code);
+        const rawText = response.text?.trim() || "{}";
+        const parsed = cleanAndParseJson(rawText);
+        if (parsed && (parsed.code || parsed.previewHtml)) {
+          if (parsed.code) {
+            parsed.code = healTsxSyntaxErrors(parsed.code);
+          }
+          if (parsed.previewHtml) {
+            parsed.previewHtml = healHtmlPreviewSyntax(parsed.previewHtml);
+          }
+          parsed.suggestedTitle = formatFizkesPopovTitle(parsed.suggestedTitle, {
+            brief,
+            style: iconStyle,
+            is3D: isPremium3D,
+          });
+          parsed.popovKeywords = generatePopovKeywords(parsed.suggestedTitle, {
+            brief,
+            objects: parsed.detectedObjects,
+          });
+          parsed.suggestedKeywords = parsed.popovKeywords.all;
+          return parsed;
         }
-        if (parsed.previewHtml) {
-          parsed.previewHtml = healHtmlPreviewSyntax(parsed.previewHtml);
+        throw new Error(`Model ${currentModel} tidak menghasilkan code atau previewHtml`);
+      } catch (err: any) {
+        lastError = err;
+        const errMsg = (err?.message || "").toLowerCase();
+        const isQuotaOrAuthError =
+          errMsg.includes("429") ||
+          errMsg.includes("resource_exhausted") ||
+          errMsg.includes("quota") ||
+          errMsg.includes("rate limit") ||
+          errMsg.includes("exceeded") ||
+          errMsg.includes("403") ||
+          errMsg.includes("api key") ||
+          errMsg.includes("permission_denied") ||
+          errMsg.includes("unauthenticated");
+
+        if (isQuotaOrAuthError && keyAttempt < totalKeys - 1) {
+          const rotated = tryRotateGeminiKey();
+          if (rotated) {
+            console.warn(`[Auto Key Failover] Masalah pada key sebelumnya (${errMsg.slice(0, 60)}). Beralih ke Gemini Key berikutnya untuk model ${currentModel}...`);
+            await new Promise((res) => setTimeout(res, 600));
+            continue;
+          }
         }
-        parsed.suggestedTitle = formatFizkesPopovTitle(parsed.suggestedTitle, {
-          brief,
-          style: iconStyle,
-          is3D: isPremium3D,
-        });
-        parsed.popovKeywords = generatePopovKeywords(parsed.suggestedTitle, {
-          brief,
-          objects: parsed.detectedObjects,
-        });
-        parsed.suggestedKeywords = parsed.popovKeywords.all;
-        return parsed;
+
+        if (errMsg.includes("not found") || errMsg.includes("404") || errMsg.includes("unsupported")) {
+          break;
+        }
+
+        if (keyAttempt < totalKeys - 1 && tryRotateGeminiKey()) {
+          continue;
+        }
+        break;
       }
-      throw new Error(`Model ${currentModel} tidak menghasilkan code atau previewHtml`);
-    } catch (err: any) {
-      lastError = err;
-      console.warn(`[Model Attempt Failed] ${currentModel}:`, err?.message || err);
     }
   }
 
-  throw lastError || new Error("Semua model fallback gagal menghasilkan animasi.");
+  throw lastError || new Error("Semua model dan API Key Gemini gagal menghasilkan animasi.");
 }
 
 export async function applyVariationService(
@@ -2344,27 +2406,25 @@ Output harus berupa JSON dengan struktur:
     throw new Error(`Gagal memodifikasi animasi dari provider ${providerName}.`);
   }
 
-  // 2. Default Gemini
-  const candidateModels = [
-    "gemini-3.8-flash",       // Primer: gemini-3.8-flash
-    "gemini-3.7-flash",       // Fallback 1: gemini-3.7-flash
-    "gemini-3.6-flash",       // Fallback 2: gemini-3.6-flash
-  ];
+  // 2. Default Gemini with Candidate Models & Key Failover Rotation
+  const aiSettingsVar = getAISettings();
+  const bulkKeysVar = parseBulkGeminiKeys(aiSettingsVar.geminiKeysText);
+  const totalKeysVar = Math.max(1, bulkKeysVar.length);
+  const candidateModels = getCandidateGeminiModels();
 
   let lastError: any = null;
   for (let mIdx = 0; mIdx < candidateModels.length; mIdx++) {
     const currentModel = candidateModels[mIdx];
-    try {
-      if (mIdx > 0) {
-        console.warn(`[Variation Fallback Active] Model ke-${mIdx}: ${currentModel}`);
-        await new Promise((res) => setTimeout(res, 1500));
-      }
+    for (let keyAttempt = 0; keyAttempt < totalKeysVar; keyAttempt++) {
+      try {
+        if (mIdx > 0 && keyAttempt === 0) {
+          console.warn(`[Variation Fallback Active] Model ke-${mIdx}: ${currentModel}`);
+          await new Promise((res) => setTimeout(res, 800));
+        }
 
-      const activeAi = getGeminiClient();
-      const response = await activeAi.models.generateContent({
-        model: currentModel,
-        contents: prompt,
-        config: {
+        const activeAi = getGeminiClient();
+        const supportsThinking = currentModel.includes("2.5") || currentModel.includes("thinking") || currentModel.includes("3.");
+        const variationConfig: any = {
           responseMimeType: "application/json",
           responseSchema: {
             type: Type.OBJECT,
@@ -2379,42 +2439,83 @@ Output harus berupa JSON dengan struktur:
             required: ["code", "previewHtml", "suggestedTitle"],
           },
           maxOutputTokens: 65536,
-          thinkingConfig: {
-            thinkingLevel: ThinkingLevel.HIGH,
-          },
           systemInstruction:
             "You are a Precision Code Surgeon for Remotion TSX and WebGL/Canvas visual code. Your mission is to apply STRICT, SURGICAL, IN-PLACE EDITS to existing animations based on user requests. CRITICAL RULE: DO NOT REWRITE OR OVERHAUL UNRELATED PARTS OF THE CODE. 95%+ of existing geometry, subject shapes, structure, and animation logic must remain 100% untouched. You only modify the exact properties, colors, speeds, sizes, or elements specifically targeted in the user's checklist or prompt. Both Remotion TSX ('code') and HTML preview ('previewHtml') must be kept in perfect sync. MANDATORY ZOOM OUT / SCALE: If user asks for 'zoom out' or 'perkecil' (e.g. 'zoom out 1.2x'), you MUST REDUCE scale (scale < 1.0, e.g. scale: 0.8 or 0.83). NEVER increase scale or set scale to 1.2 which zooms in and cuts off edges! Ensure safe margin padding of at least 15% from left and right boundaries. MANDATORY FONT PRESERVATION: Keep font-family identical. For typography in TSX, import delayRender & continueRender and use document.fonts.ready with <style>{`@import url('https://fonts.googleapis.com/...');`}</style> so Remotion headless rendering NEVER falls back to default Times New Roman! MANDATORY ZERO-DEFECT TSX SYNTAX (IDENTICAL TO INITIAL GENERATION QUALITY): Absolutely NO comments inside return (...), JSX style attributes MUST use double curly braces: style={{ ... }} (NEVER write 'style=' without '{{'), NO lone '{' in JSX tags, NO ellipsis '...' placeholders, ALL SVG leaf tags must be strictly self-closing '/>', and ALL container tags (<g>, <defs>, <svg>, <div>, <linearGradient>, <ThreeCanvas>) MUST be explicitly closed with proper matching tags before </AbsoluteFill> so that NO 'Expected corresponding JSX closing tag for AbsoluteFill' error can ever occur. Full code must be complete from imports to export default without truncation.",
-        },
-      });
+        };
+        if (supportsThinking) {
+          variationConfig.thinkingConfig = {
+            thinkingLevel: ThinkingLevel.HIGH,
+          };
+        }
+        const response = await activeAi.models.generateContent({
+          model: currentModel,
+          contents: prompt,
+          config: variationConfig,
+        });
 
-      const rawText = response.text?.trim() || "{}";
-      let cleaned = rawText;
-      if (cleaned.startsWith("```json")) {
-        cleaned = cleaned.replace(/^```json\s*/, "").replace(/\s*```$/, "");
-      } else if (cleaned.startsWith("```")) {
-        cleaned = cleaned.replace(/^```\s*/, "").replace(/\s*```$/, "");
-      }
-      const parsed = JSON.parse(cleaned) as ApplyVariationResponse;
-      if (parsed) {
-        if (parsed.code) {
-          parsed.code = healTsxSyntaxErrors(parsed.code);
+        const rawText = response.text?.trim() || "{}";
+        let cleaned = rawText;
+        cleaned = cleaned.replace(/<think>[\s\S]*?<\/think>/gi, "").trim();
+        if (cleaned.startsWith("```json")) {
+          cleaned = cleaned.replace(/^```json\s*/, "").replace(/\s*```$/, "");
+        } else if (cleaned.startsWith("```")) {
+          cleaned = cleaned.replace(/^```\s*/, "").replace(/\s*```$/, "");
         }
-        if (parsed.previewHtml) {
-          parsed.previewHtml = healHtmlPreviewSyntax(parsed.previewHtml);
+        const firstBrace = cleaned.indexOf("{");
+        const lastBrace = cleaned.lastIndexOf("}");
+        if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
+          cleaned = cleaned.substring(firstBrace, lastBrace + 1);
         }
-        parsed.suggestedTitle = formatFizkesPopovTitle(parsed.suggestedTitle, {
-          brief: variationPrompt,
-          is3D: true,
-        });
-        parsed.popovKeywords = generatePopovKeywords(parsed.suggestedTitle, {
-          brief: variationPrompt,
-        });
-        parsed.suggestedKeywords = parsed.popovKeywords.all;
+        const parsed = JSON.parse(cleaned) as ApplyVariationResponse;
+        if (parsed) {
+          if (parsed.code) {
+            parsed.code = healTsxSyntaxErrors(parsed.code);
+          }
+          if (parsed.previewHtml) {
+            parsed.previewHtml = healHtmlPreviewSyntax(parsed.previewHtml);
+          }
+          parsed.suggestedTitle = formatFizkesPopovTitle(parsed.suggestedTitle, {
+            brief: variationPrompt,
+            is3D: true,
+          });
+          parsed.popovKeywords = generatePopovKeywords(parsed.suggestedTitle, {
+            brief: variationPrompt,
+          });
+          parsed.suggestedKeywords = parsed.popovKeywords.all;
+        }
+        return parsed;
+      } catch (err: any) {
+        lastError = err;
+        const errMsg = (err?.message || "").toLowerCase();
+        const isQuotaOrAuthError =
+          errMsg.includes("429") ||
+          errMsg.includes("resource_exhausted") ||
+          errMsg.includes("quota") ||
+          errMsg.includes("rate limit") ||
+          errMsg.includes("exceeded") ||
+          errMsg.includes("403") ||
+          errMsg.includes("api key") ||
+          errMsg.includes("permission_denied") ||
+          errMsg.includes("unauthenticated");
+
+        if (isQuotaOrAuthError && keyAttempt < totalKeysVar - 1) {
+          const rotated = tryRotateGeminiKey();
+          if (rotated) {
+            console.warn(`[Auto Key Failover] Masalah pada key sebelumnya (${errMsg.slice(0, 60)}). Mencoba key berikutnya...`);
+            await new Promise((res) => setTimeout(res, 600));
+            continue;
+          }
+        }
+
+        if (errMsg.includes("not found") || errMsg.includes("404") || errMsg.includes("unsupported")) {
+          break;
+        }
+
+        if (keyAttempt < totalKeysVar - 1 && tryRotateGeminiKey()) {
+          continue;
+        }
+        break;
       }
-      return parsed;
-    } catch (err: any) {
-      lastError = err;
-      console.warn(`[Variation Model Attempt Failed] ${currentModel}:`, err?.message || err);
     }
   }
 
@@ -2985,20 +3086,17 @@ Berikan output JSON dengan format:
     throw new Error(`Model ${model} dari ${providerName} tidak menghasilkan previewHtml`);
   }
 
-  const candidateModels = [
-    "gemini-3.8-flash",
-    "gemini-3.7-flash",
-    "gemini-3.6-flash",
-  ];
+  const bulkKeysPrev = parseBulkGeminiKeys(aiSettings.geminiKeysText);
+  const totalKeysPrev = Math.max(1, bulkKeysPrev.length);
+  const candidateModels = getCandidateGeminiModels();
 
   for (let mIdx = 0; mIdx < candidateModels.length; mIdx++) {
     const currentModel = candidateModels[mIdx];
-    try {
-      const activeAi = getGeminiClient();
-      const response = await activeAi.models.generateContent({
-        model: currentModel,
-        contents: prompt,
-        config: {
+    for (let keyAttempt = 0; keyAttempt < totalKeysPrev; keyAttempt++) {
+      try {
+        const activeAi = getGeminiClient();
+        const supportsThinking = currentModel.includes("2.5") || currentModel.includes("thinking") || currentModel.includes("3.");
+        const previewConfig: any = {
           responseMimeType: "application/json",
           responseSchema: {
             type: Type.OBJECT,
@@ -3013,28 +3111,66 @@ Berikan output JSON dengan format:
             required: ["previewHtml"],
           },
           maxOutputTokens: 65536,
-          thinkingConfig: {
-            thinkingLevel: ThinkingLevel.HIGH,
-          },
           systemInstruction:
             "You are a Remotion TSX to Standalone HTML & Canvas/SVG preview compiler. Generate ultra-clean, 60fps standalone HTML previews that replicate the Remotion composition visually with window.draw(progress, frame).",
-        },
-      });
+        };
+        if (supportsThinking) {
+          previewConfig.thinkingConfig = {
+            thinkingLevel: ThinkingLevel.HIGH,
+          };
+        }
+        const response = await activeAi.models.generateContent({
+          model: currentModel,
+          contents: prompt,
+          config: previewConfig,
+        });
 
-      const rawText = response.text?.trim() || "{}";
-      let cleaned = rawText;
-      if (cleaned.startsWith("```json")) {
-        cleaned = cleaned.replace(/^```json\s*/, "").replace(/\s*```$/, "");
-      } else if (cleaned.startsWith("```")) {
-        cleaned = cleaned.replace(/^```\s*/, "").replace(/\s*```$/, "");
+        const rawText = response.text?.trim() || "{}";
+        let cleaned = rawText;
+        cleaned = cleaned.replace(/<think>[\s\S]*?<\/think>/gi, "").trim();
+        if (cleaned.startsWith("```json")) {
+          cleaned = cleaned.replace(/^```json\s*/, "").replace(/\s*```$/, "");
+        } else if (cleaned.startsWith("```")) {
+          cleaned = cleaned.replace(/^```\s*/, "").replace(/\s*```$/, "");
+        }
+        const firstBrace = cleaned.indexOf("{");
+        const lastBrace = cleaned.lastIndexOf("}");
+        if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
+          cleaned = cleaned.substring(firstBrace, lastBrace + 1);
+        }
+        const parsed = JSON.parse(cleaned) as GeneratePreviewFromTsxResponse;
+        if (parsed && parsed.previewHtml) {
+          parsed.previewHtml = healHtmlPreviewSyntax(parsed.previewHtml);
+          return parsed;
+        }
+      } catch (err: any) {
+        const errMsg = (err?.message || "").toLowerCase();
+        const isQuotaOrAuthError =
+          errMsg.includes("429") ||
+          errMsg.includes("resource_exhausted") ||
+          errMsg.includes("quota") ||
+          errMsg.includes("rate limit") ||
+          errMsg.includes("exceeded") ||
+          errMsg.includes("403") ||
+          errMsg.includes("api key") ||
+          errMsg.includes("permission_denied") ||
+          errMsg.includes("unauthenticated");
+
+        if (isQuotaOrAuthError && keyAttempt < totalKeysPrev - 1) {
+          if (tryRotateGeminiKey()) {
+            console.warn(`[Auto Key Failover] Beralih ke Gemini Key berikutnya untuk model ${currentModel}...`);
+            await new Promise((res) => setTimeout(res, 600));
+            continue;
+          }
+        }
+        if (errMsg.includes("not found") || errMsg.includes("404") || errMsg.includes("unsupported")) {
+          break;
+        }
+        if (keyAttempt < totalKeysPrev - 1 && tryRotateGeminiKey()) {
+          continue;
+        }
+        break;
       }
-      const parsed = JSON.parse(cleaned) as GeneratePreviewFromTsxResponse;
-      if (parsed && parsed.previewHtml) {
-        parsed.previewHtml = healHtmlPreviewSyntax(parsed.previewHtml);
-        return parsed;
-      }
-    } catch (err: any) {
-      console.warn(`[Preview Generator Attempt Failed] ${currentModel}:`, err?.message || err);
     }
   }
 

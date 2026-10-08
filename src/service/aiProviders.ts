@@ -32,6 +32,8 @@ export interface AISettings {
   activeProvider: AIProviderType;
   geminiKeysText: string;
   activeGeminiKeyIndex: number;
+  geminiSelectedModel?: string;
+  geminiScannedModels?: ScannedModelInfo[];
   openrouterKey: string;
   openrouterSelectedModel: string;
   openrouterScannedModels: ScannedModelInfo[];
@@ -63,6 +65,54 @@ export const DEFAULT_AI_SETTINGS: AISettings = {
   activeProvider: 'gemini',
   geminiKeysText: '',
   activeGeminiKeyIndex: 0,
+  geminiSelectedModel: 'gemini-2.5-flash',
+  geminiScannedModels: [
+    {
+      id: 'gemini-2.5-flash',
+      name: 'Gemini 2.5 Flash (Rekomendasi Cepat & Multimodal)',
+      description: 'Model generasi terbaru Google dengan latensi rendah, penalaran kuat, dan dukungan visual gambar prima.',
+      contextLength: 1048576,
+      isRecommended: true,
+      supportsVision: true,
+      provider: 'gemini',
+    },
+    {
+      id: 'gemini-2.5-pro',
+      name: 'Gemini 2.5 Pro (Penalaran Kompleks & 3D WebGL)',
+      description: 'Model tercanggih Google untuk coding Three.js, simulasi fisika, dan akurasi geometri tertinggi.',
+      contextLength: 1048576,
+      isRecommended: true,
+      supportsVision: true,
+      provider: 'gemini',
+    },
+    {
+      id: 'gemini-2.0-flash',
+      name: 'Gemini 2.0 Flash (Stabil & Cepat)',
+      description: 'Respon cepat dengan dukungan multimodal penuh.',
+      contextLength: 1048576,
+      isRecommended: true,
+      supportsVision: true,
+      provider: 'gemini',
+    },
+    {
+      id: 'gemini-1.5-pro',
+      name: 'Gemini 1.5 Pro (Jendela Konteks 2 Juta Token)',
+      description: 'Model penalaran dengan jendela konteks raksasa 2M token.',
+      contextLength: 2097152,
+      isRecommended: false,
+      supportsVision: true,
+      provider: 'gemini',
+    },
+    {
+      id: 'gemini-1.5-flash',
+      name: 'Gemini 1.5 Flash (Ringan & Hemat)',
+      description: 'Model serbaguna untuk eksekusi cepat dan stabil.',
+      contextLength: 1048576,
+      isRecommended: false,
+      supportsVision: true,
+      provider: 'gemini',
+    },
+  ],
   openrouterKey: '',
   openrouterSelectedModel: 'anthropic/claude-3.5-sonnet',
   openrouterScannedModels: [
@@ -275,6 +325,98 @@ export async function validateBulkGeminiKeys(keys: string[]): Promise<KeyValidat
     results.push(res);
   }
   return results;
+}
+
+/**
+ * Scans available models from Google Gemini API using provided API Key
+ */
+export async function scanGeminiModels(
+  apiKey: string
+): Promise<{ valid: boolean; models: ScannedModelInfo[]; keyStatusText?: string; error?: string }> {
+  if (!apiKey || !apiKey.trim()) {
+    return { valid: false, models: [], error: 'Masukkan API Key Gemini terlebih dahulu.' };
+  }
+
+  const cleanKey = apiKey.trim();
+
+  try {
+    const resp = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(cleanKey)}`,
+      { method: 'GET' }
+    );
+
+    if (!resp.ok) {
+      if (resp.status === 400 || resp.status === 403) {
+        return { valid: false, models: [], error: 'API Key Gemini tidak valid atau tidak memiliki akses (HTTP ' + resp.status + ').' };
+      }
+      if (resp.status === 429) {
+        return { valid: false, models: [], error: 'Rate limit kuota tercapai pada API Key ini (429).' };
+      }
+      const errJson = await resp.json().catch(() => ({}));
+      return {
+        valid: false,
+        models: [],
+        error: errJson.error?.message || `Gagal menghubungi Google Gemini API (HTTP ${resp.status})`,
+      };
+    }
+
+    const data = await resp.json();
+    const rawList: any[] = data.models || [];
+
+    // Filter only gemini generative models supporting generateContent
+    const geminiModels = rawList.filter((m: any) => {
+      const methods: string[] = m.supportedGenerationMethods || [];
+      const name: string = m.name || '';
+      return methods.includes('generateContent') && name.includes('gemini');
+    });
+
+    if (geminiModels.length === 0) {
+      return {
+        valid: false,
+        models: [],
+        error: 'Tidak ditemukan model Gemini generateContent pada API Key ini.',
+      };
+    }
+
+    const models: ScannedModelInfo[] = geminiModels.map((m: any) => {
+      const cleanId = (m.name || '').replace(/^models\//, '');
+      const isRecommended = Boolean(
+        cleanId.includes('gemini-2.5-pro') ||
+        cleanId.includes('gemini-2.5-flash') ||
+        cleanId.includes('gemini-2.0-flash') ||
+        cleanId.includes('gemini-3.')
+      );
+
+      return {
+        id: cleanId,
+        name: m.displayName ? `${m.displayName} (${cleanId})` : cleanId,
+        description: m.description ? m.description.slice(0, 180) + '...' : undefined,
+        contextLength: m.inputTokenLimit || 1000000,
+        isRecommended,
+        supportsVision: true,
+        provider: 'gemini',
+      };
+    });
+
+    // Sort: Recommended first, then by ID
+    models.sort((a, b) => {
+      if (a.isRecommended && !b.isRecommended) return -1;
+      if (!a.isRecommended && b.isRecommended) return 1;
+      return a.id.localeCompare(b.id);
+    });
+
+    return {
+      valid: true,
+      models,
+      keyStatusText: `API Key Gemini Aktif ✓ Berhasil memindai ${models.length} model resmi Google!`,
+    };
+  } catch (err: any) {
+    return {
+      valid: false,
+      models: [],
+      error: err.message || 'Gagal memindai model dari Google Gemini.',
+    };
+  }
 }
 
 /**
