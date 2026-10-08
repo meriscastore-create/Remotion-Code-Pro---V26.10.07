@@ -524,13 +524,42 @@ export const AISettingsModal: React.FC<AISettingsModalProps> = ({
                   <span className="text-[10px] text-zinc-400 font-bold uppercase tracking-wider block">
                     Model OpenRouter Aktif yang Dipilih:
                   </span>
-                  <span className="text-xs font-extrabold text-emerald-400 font-mono">
-                    {selectedOpenRouterModel}
-                  </span>
+                  <div className="flex items-center gap-2 mt-0.5">
+                    <span className="text-xs font-extrabold text-emerald-400 font-mono">
+                      {selectedOpenRouterModel}
+                    </span>
+                    {(selectedOpenRouterModel.includes('claude-3') ||
+                      selectedOpenRouterModel.includes('gpt-4o') ||
+                      selectedOpenRouterModel.includes('gemini') ||
+                      selectedOpenRouterModel.includes('-vl') ||
+                      selectedOpenRouterModel.includes('vision') ||
+                      selectedOpenRouterModel.includes('pixtral')) ? (
+                      <span className="text-[9px] bg-teal-500/20 text-teal-300 font-black px-1.5 py-0.2 rounded border border-teal-500/30 flex items-center gap-0.5">
+                        <Eye className="w-2.5 h-2.5" />
+                        Vision / Gambar Aktif ✓
+                      </span>
+                    ) : (
+                      <span className="text-[9px] bg-amber-500/20 text-amber-300 font-black px-1.5 py-0.2 rounded border border-amber-500/30 flex items-center gap-0.5">
+                        <AlertCircle className="w-2.5 h-2.5" />
+                        Hanya Teks (Tanpa Gambar)
+                      </span>
+                    )}
+                  </div>
                 </div>
                 <span className="text-[10px] bg-emerald-500/20 text-emerald-300 font-black px-2 py-0.5 rounded-full border border-emerald-500/30">
                   Dipilih ✓
                 </span>
+              </div>
+
+              {/* GUIDANCE TIP FOR VISION / PROMPT */}
+              <div className="p-3 rounded-xl bg-teal-950/30 border border-teal-800/40 text-[11px] text-teal-200/90 flex items-start gap-2.5">
+                <Info className="w-4 h-4 text-teal-400 shrink-0 mt-0.5" />
+                <div>
+                  <strong className="text-teal-300 font-bold">Panduan Referensi Gambar di OpenRouter:</strong>
+                  <p className="text-zinc-300 mt-0.5 leading-relaxed">
+                    Jika Anda mengunggah <strong>Gambar, SVG, atau Video referensi</strong>, pastikan memilih model berlabel <span className="text-teal-300 font-bold">Vision / Gambar ✓</span> (seperti <strong>Claude 3.5 Sonnet</strong>, <strong>Claude 3.7 Sonnet</strong>, <strong>Gemini 2.5 Pro</strong>, atau <strong>GPT-4o</strong>). Model teks murni seperti DeepSeek V3 hanya membaca prompt tulisan dan tidak dapat menganalisis gambar.
+                  </p>
+                </div>
               </div>
 
               {/* SEARCH & MODEL LIST */}
@@ -564,12 +593,22 @@ export const AISettingsModal: React.FC<AISettingsModalProps> = ({
                         }`}
                       >
                         <div className="space-y-1">
-                          <div className="flex items-center gap-2">
+                          <div className="flex items-center gap-1.5 flex-wrap">
                             <span className="text-xs font-bold text-zinc-200">{m.name}</span>
                             {m.isRecommended && (
                               <span className="text-[9px] bg-amber-500/20 text-amber-300 px-1.5 py-0.2 rounded font-black border border-amber-500/30 flex items-center gap-1">
                                 <Star className="w-2.5 h-2.5 fill-current" />
-                                Rekomendasi Utama
+                                Rekomendasi
+                              </span>
+                            )}
+                            {m.supportsVision ? (
+                              <span className="text-[9px] bg-teal-500/20 text-teal-300 px-1.5 py-0.2 rounded font-black border border-teal-500/30 flex items-center gap-0.5">
+                                <Eye className="w-2.5 h-2.5" />
+                                Vision / Gambar ✓
+                              </span>
+                            ) : (
+                              <span className="text-[9px] bg-zinc-800 text-zinc-400 px-1.5 py-0.2 rounded font-medium border border-zinc-700">
+                                Teks Saja
                               </span>
                             )}
                             {m.isFree && (
@@ -751,12 +790,22 @@ export const AISettingsModal: React.FC<AISettingsModalProps> = ({
                         }`}
                       >
                         <div className="space-y-1">
-                          <div className="flex items-center gap-2">
+                          <div className="flex items-center gap-1.5 flex-wrap">
                             <span className="text-xs font-bold text-zinc-200">{m.name}</span>
                             {m.isRecommended && (
                               <span className="text-[9px] bg-amber-500/20 text-amber-300 px-1.5 py-0.2 rounded font-black border border-amber-500/30 flex items-center gap-1">
                                 <Star className="w-2.5 h-2.5 fill-current" />
                                 Rekomendasi
+                              </span>
+                            )}
+                            {m.supportsVision ? (
+                              <span className="text-[9px] bg-teal-500/20 text-teal-300 px-1.5 py-0.2 rounded font-black border border-teal-500/30 flex items-center gap-0.5">
+                                <Eye className="w-2.5 h-2.5" />
+                                Vision / Gambar ✓
+                              </span>
+                            ) : (
+                              <span className="text-[9px] bg-zinc-800 text-zinc-400 px-1.5 py-0.2 rounded font-medium border border-zinc-700">
+                                Teks Saja
                               </span>
                             )}
                           </div>

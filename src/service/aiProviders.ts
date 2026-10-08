@@ -16,6 +16,7 @@ export interface ScannedModelInfo {
   };
   isFree?: boolean;
   isRecommended?: boolean;
+  supportsVision?: boolean;
   provider: 'openrouter' | '9router' | 'gemini';
 }
 
@@ -67,35 +68,57 @@ export const DEFAULT_AI_SETTINGS: AISettings = {
   openrouterScannedModels: [
     {
       id: 'anthropic/claude-3.5-sonnet',
-      name: 'Claude 3.5 Sonnet (Rekomendasi Utama Remotion)',
-      description: 'Model terunggul untuk Remotion TSX, WebGL Shader, dan Canvas visual coding.',
+      name: 'Claude 3.5 Sonnet (Rekomendasi Utama Remotion & Vision)',
+      description: 'Model nomor satu untuk Remotion TSX, WebGL Shader, pemahaman gambar referensi, dan Canvas visual coding.',
       contextLength: 200000,
       isRecommended: true,
+      supportsVision: true,
       provider: 'openrouter',
     },
     {
       id: 'google/gemini-2.5-pro',
-      name: 'Gemini 2.5 Pro (Google)',
-      description: 'Model penalaran tinggi dengan pemahaman konteks visual mutakhir.',
+      name: 'Gemini 2.5 Pro (Google Multimodal Vision)',
+      description: 'Penalaran visual tingkat tinggi dengan pemahaman konteks gambar referensi yang sangat detail.',
       contextLength: 1000000,
       isRecommended: true,
+      supportsVision: true,
+      provider: 'openrouter',
+    },
+    {
+      id: 'openai/gpt-4o',
+      name: 'GPT-4o (OpenAI Flagship Multimodal Vision)',
+      description: 'Model multimodal flagship OpenAI, sangat akurat dalam mengikuti prompt dan gambar.',
+      contextLength: 128000,
+      isRecommended: true,
+      supportsVision: true,
+      provider: 'openrouter',
+    },
+    {
+      id: 'google/gemini-2.0-flash-001',
+      name: 'Gemini 2.0 Flash (Cepat & Multimodal)',
+      description: 'Generasi kilat dengan dukungan pemahaman gambar referensi.',
+      contextLength: 1000000,
+      isRecommended: true,
+      supportsVision: true,
       provider: 'openrouter',
     },
     {
       id: 'deepseek/deepseek-chat',
-      name: 'DeepSeek V3 (Cepat & Sangat Hemat)',
-      description: 'Kinerja coding handal dengan biaya sangat terjangkau.',
+      name: 'DeepSeek V3 (Cepat & Hemat - Khusus Teks)',
+      description: 'Kinerja coding handal dengan biaya sangat terjangkau (Catatan: Khusus prompt teks murni, tidak mendukung gambar).',
       contextLength: 64000,
       isRecommended: true,
+      supportsVision: false,
       provider: 'openrouter',
     },
     {
       id: 'google/gemini-2.0-flash-exp:free',
-      name: 'Gemini 2.0 Flash (Free Tier)',
-      description: 'Gratis di OpenRouter, respon instan.',
+      name: 'Gemini 2.0 Flash (Free Tier & Vision)',
+      description: 'Gratis di OpenRouter, respon instan dengan dukungan gambar referensi.',
       contextLength: 1000000,
       isFree: true,
       isRecommended: true,
+      supportsVision: true,
       provider: 'openrouter',
     },
   ],
@@ -106,15 +129,17 @@ export const DEFAULT_AI_SETTINGS: AISettings = {
     {
       id: 'claude-3-5-sonnet',
       name: 'Claude 3.5 Sonnet (9Router)',
-      description: 'Optimal untuk generasi kode animasi Remotion TSX.',
+      description: 'Optimal untuk generasi kode animasi Remotion TSX dan analisis gambar visual.',
       isRecommended: true,
+      supportsVision: true,
       provider: '9router',
     },
     {
       id: 'gemini-2.5-pro',
       name: 'Gemini 2.5 Pro (9Router)',
-      description: 'Kreativitas visual 3D & komposisi kaya detail.',
+      description: 'Kreativitas visual 3D & komposisi kaya detail multimodal.',
       isRecommended: true,
+      supportsVision: true,
       provider: '9router',
     },
     {
@@ -122,10 +147,37 @@ export const DEFAULT_AI_SETTINGS: AISettings = {
       name: 'GPT-4o (9Router)',
       description: 'Model multimodal flagship OpenAI.',
       isRecommended: true,
+      supportsVision: true,
       provider: '9router',
     },
   ],
 };
+
+export function isVisionCapableModel(modelId: string, architecture?: any): boolean {
+  if (!modelId) return false;
+  const inputModalities = architecture?.input_modalities || [];
+  const modality = architecture?.modality || '';
+  if (
+    inputModalities.includes('image') ||
+    inputModalities.includes('multimodal') ||
+    modality.includes('image') ||
+    modality.includes('multimodal')
+  ) {
+    return true;
+  }
+  const id = modelId.toLowerCase();
+  return (
+    id.includes('claude-3') ||
+    id.includes('gpt-4o') ||
+    id.includes('gemini') ||
+    id.includes('-vl') ||
+    id.includes('vision') ||
+    id.includes('pixtral') ||
+    id.includes('omni') ||
+    id.includes('llama-3.2-11b-vision') ||
+    id.includes('llama-3.2-90b-vision')
+  );
+}
 
 export function getAISettings(): AISettings {
   if (typeof window === 'undefined') return DEFAULT_AI_SETTINGS;
@@ -292,6 +344,9 @@ export async function scanOpenRouterModels(
       const promptPrice = m.pricing?.prompt ? Number(m.pricing.prompt) * 1000000 : 0;
       const isFree = m.id.endsWith(':free') || promptPrice === 0;
 
+      const architecture = m.architecture || {};
+      const supportsVision = isVisionCapableModel(m.id, architecture);
+
       return {
         id: m.id,
         name: m.name || m.id,
@@ -303,6 +358,7 @@ export async function scanOpenRouterModels(
         },
         isFree,
         isRecommended,
+        supportsVision,
         provider: 'openrouter',
       };
     });
@@ -366,12 +422,14 @@ export async function scanNineRouterModels(
         id.includes('deepseek') ||
         id.includes('coder')
       );
+      const supportsVision = isVisionCapableModel(id);
 
       return {
         id,
         name: m.name || id,
         contextLength: m.context_length || 128000,
         isRecommended,
+        supportsVision,
         provider: '9router',
       };
     });
@@ -393,18 +451,140 @@ export async function scanNineRouterModels(
 }
 
 /**
- * Executes a Chat Completion request to OpenRouter or 9Router
+ * Extracts a single representative video frame from a video data URL
  */
-export async function executeOpenAICompatibleChat(params: {
+export async function extractVideoThumbnail(videoDataUrl: string): Promise<string> {
+  if (typeof window === 'undefined' || typeof document === 'undefined') {
+    return videoDataUrl;
+  }
+  return new Promise((resolve) => {
+    try {
+      const video = document.createElement('video');
+      video.muted = true;
+      video.playsInline = true;
+      video.crossOrigin = 'anonymous';
+      video.src = videoDataUrl;
+      video.currentTime = 0.1;
+
+      const timeout = setTimeout(() => {
+        resolve(videoDataUrl);
+      }, 4000);
+
+      video.onloadeddata = () => {
+        try {
+          const canvas = document.createElement('canvas');
+          canvas.width = Math.min(1280, video.videoWidth || 1280);
+          canvas.height = Math.min(720, video.videoHeight || 720);
+          const ctx = canvas.getContext('2d');
+          if (ctx) {
+            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+            const frameUrl = canvas.toDataURL('image/jpeg', 0.85);
+            clearTimeout(timeout);
+            resolve(frameUrl);
+            return;
+          }
+        } catch (e) {}
+        clearTimeout(timeout);
+        resolve(videoDataUrl);
+      };
+
+      video.onerror = () => {
+        clearTimeout(timeout);
+        resolve(videoDataUrl);
+      };
+    } catch (e) {
+      resolve(videoDataUrl);
+    }
+  });
+}
+
+/**
+ * Optimizes an image data URL for OpenRouter/multimodal API requests.
+ * Resizes images larger than 1568px and compresses high-res images to avoid payload size errors.
+ */
+export async function optimizeReferenceImageForAI(dataUrl: string): Promise<string> {
+  if (typeof window === 'undefined' || typeof document === 'undefined') {
+    return dataUrl;
+  }
+  if (!dataUrl || !dataUrl.startsWith('data:')) {
+    return dataUrl;
+  }
+
+  // If it's a video, extract a representative frame
+  if (dataUrl.startsWith('data:video/')) {
+    return extractVideoThumbnail(dataUrl);
+  }
+
+  // If it's SVG data url, return as is
+  if (dataUrl.startsWith('data:image/svg+xml')) {
+    return dataUrl;
+  }
+
+  return new Promise((resolve) => {
+    try {
+      const img = new Image();
+      img.onload = () => {
+        try {
+          const maxDim = 1568;
+          let w = img.naturalWidth || img.width;
+          let h = img.naturalHeight || img.height;
+
+          // If image is already reasonably sized and not gigantic, resolve directly
+          if (w <= maxDim && h <= maxDim && dataUrl.length < 2 * 1024 * 1024) {
+            resolve(dataUrl);
+            return;
+          }
+
+          if (w > maxDim || h > maxDim) {
+            if (w > h) {
+              h = Math.round((h * maxDim) / w);
+              w = maxDim;
+            } else {
+              w = Math.round((w * maxDim) / h);
+              h = maxDim;
+            }
+          }
+
+          const canvas = document.createElement('canvas');
+          canvas.width = w;
+          canvas.height = h;
+          const ctx = canvas.getContext('2d');
+          if (!ctx) {
+            resolve(dataUrl);
+            return;
+          }
+          ctx.drawImage(img, 0, 0, w, h);
+          const optimized = canvas.toDataURL('image/jpeg', 0.88);
+          resolve(optimized);
+        } catch (e) {
+          resolve(dataUrl);
+        }
+      };
+      img.onerror = () => resolve(dataUrl);
+      img.src = dataUrl;
+    } catch (e) {
+      resolve(dataUrl);
+    }
+  });
+}
+
+export interface OpenAIChatCompletionParams {
   baseUrl: string;
   apiKey: string;
   model: string;
   systemInstruction?: string;
   userPrompt: string;
+  imageUrl?: string;
   temperature?: number;
   providerName?: string;
-}): Promise<string> {
-  const { baseUrl, apiKey, model, systemInstruction, userPrompt, temperature = 0.7, providerName = 'OpenRouter' } = params;
+}
+
+/**
+ * Executes a Chat Completion request to OpenRouter or 9Router
+ * Supports multimodal image inputs, automatic reasoning tag stripping, and model fallbacks.
+ */
+export async function executeOpenAICompatibleChat(params: OpenAIChatCompletionParams): Promise<string> {
+  const { baseUrl, apiKey, model, systemInstruction, userPrompt, imageUrl, temperature = 0.7, providerName = 'OpenRouter' } = params;
 
   if (!apiKey || !apiKey.trim()) {
     throw new Error(`API Key ${providerName} belum dimasukkan. Silakan atur di menu Pengaturan AI.`);
@@ -417,7 +597,25 @@ export async function executeOpenAICompatibleChat(params: {
     messages.push({ role: 'system', content: systemInstruction });
   }
 
-  messages.push({ role: 'user', content: userPrompt });
+  let userContent: any;
+  if (imageUrl && imageUrl.trim()) {
+    userContent = [
+      {
+        type: 'text',
+        text: userPrompt,
+      },
+      {
+        type: 'image_url',
+        image_url: {
+          url: imageUrl.trim(),
+        },
+      },
+    ];
+  } else {
+    userContent = userPrompt;
+  }
+
+  messages.push({ role: 'user', content: userContent });
 
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
@@ -429,6 +627,7 @@ export async function executeOpenAICompatibleChat(params: {
     headers['X-Title'] = 'Remotion Code Pro';
   }
 
+  // Attempt initial request with json_object response_format
   let response = await fetch(`${cleanBase}/chat/completions`, {
     method: 'POST',
     headers,
@@ -442,8 +641,37 @@ export async function executeOpenAICompatibleChat(params: {
 
   if (!response.ok) {
     const errText = await response.text();
-    // Jika model menolak parameter response_format json_object (misal Claude / model lama), coba ulang tanpa response_format
-    if (errText.includes('response_format') || errText.includes('json_object') || response.status === 400) {
+    let parsedErr = errText;
+    try {
+      const json = JSON.parse(errText);
+      parsedErr = json.error?.message || errText;
+    } catch (e) {}
+
+    const lowerErr = parsedErr.toLowerCase();
+
+    // Check if error is specifically about model not supporting images/vision
+    if (
+      imageUrl &&
+      (lowerErr.includes('image') ||
+       lowerErr.includes('vision') ||
+       lowerErr.includes('modal') ||
+       lowerErr.includes('endpoints found that support') ||
+       lowerErr.includes('unsupported image') ||
+       lowerErr.includes('no endpoint'))
+    ) {
+      throw new Error(
+        `Model "${model}" di ${providerName} tidak mendukung input gambar/vision.\n` +
+        `Solusi: Buka menu "Pengaturan AI" dan pilih model yang mendukung Vision (seperti Claude 3.5 Sonnet, Claude 3.7 Sonnet, Gemini 2.5 Pro, Gemini 2.0 Flash, atau GPT-4o) untuk menganalisis gambar referensi.`
+      );
+    }
+
+    // If model rejects response_format (common on Anthropic or older models), retry without response_format
+    if (
+      lowerErr.includes('response_format') ||
+      lowerErr.includes('json_object') ||
+      lowerErr.includes('json') ||
+      response.status === 400
+    ) {
       const retryResp = await fetch(`${cleanBase}/chat/completions`, {
         method: 'POST',
         headers,
@@ -453,30 +681,43 @@ export async function executeOpenAICompatibleChat(params: {
           temperature,
         }),
       });
+
       if (retryResp.ok) {
         response = retryResp;
       } else {
         const retryErrText = await retryResp.text();
-        let parsedErr = retryErrText;
+        let retryParsedErr = retryErrText;
         try {
           const json = JSON.parse(retryErrText);
-          parsedErr = json.error?.message || retryErrText;
+          retryParsedErr = json.error?.message || retryErrText;
         } catch (e) {}
-        throw new Error(`${providerName} Error (${retryResp.status}): ${parsedErr}`);
+        const retryLowerErr = retryParsedErr.toLowerCase();
+        if (
+          imageUrl &&
+          (retryLowerErr.includes('image') ||
+           retryLowerErr.includes('vision') ||
+           retryLowerErr.includes('modal') ||
+           retryLowerErr.includes('endpoints found that support') ||
+           retryLowerErr.includes('unsupported image'))
+        ) {
+          throw new Error(
+            `Model "${model}" di ${providerName} tidak mendukung input gambar/vision.\n` +
+            `Solusi: Buka menu "Pengaturan AI" dan pilih model yang mendukung Vision (seperti Claude 3.5 Sonnet, Claude 3.7 Sonnet, Gemini 2.5 Pro, Gemini 2.0 Flash, atau GPT-4o) untuk menganalisis gambar referensi.`
+          );
+        }
+        throw new Error(`${providerName} Error (${retryResp.status}): ${retryParsedErr}`);
       }
     } else {
-      let parsedErr = errText;
-      try {
-        const json = JSON.parse(errText);
-        parsedErr = json.error?.message || errText;
-      } catch (e) {}
       throw new Error(`${providerName} Error (${response.status}): ${parsedErr}`);
     }
   }
 
   const data = await response.json();
   const choice = data.choices?.[0];
-  const content = choice?.message?.content || '';
+  let content = choice?.message?.content || '';
+
+  // Strip reasoning / thinking tags from models like DeepSeek R1, Qwen, etc.
+  content = content.replace(/<think>[\s\S]*?<\/think>/gi, '').trim();
 
   if (!content) {
     throw new Error(`Respon kosong dari model ${model} pada ${providerName}.`);

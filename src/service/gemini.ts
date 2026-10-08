@@ -5,6 +5,7 @@ import {
   parseBulkGeminiKeys,
   saveAISettings,
   executeOpenAICompatibleChat,
+  optimizeReferenceImageForAI,
   AISettings,
 } from "./aiProviders";
 
@@ -1993,6 +1994,7 @@ Kode TSX ("code") dan HTML preview ("previewHtml") WAJIB LENGKAP, TEBAL, BEBAS S
 
   const cleanAndParseJson = (rawText: string): GenerateAnimationResponse => {
     let cleaned = (rawText || "").trim();
+    cleaned = cleaned.replace(/<think>[\s\S]*?<\/think>/gi, "").trim();
     if (cleaned.startsWith("```json")) {
       cleaned = cleaned.replace(/^```json\s*/, "").replace(/\s*```$/, "");
     } else if (cleaned.startsWith("```")) {
@@ -2042,14 +2044,36 @@ Kode TSX ("code") dan HTML preview ("previewHtml") WAJIB LENGKAP, TEBAL, BEBAS S
       throw new Error(`API Key untuk ${providerName} belum dimasukkan. Silakan buka menu Pengaturan AI & Model untuk memasukkan API Key.`);
     }
 
-    const combinedPrompt = `${prompt}\n\n${systemInstructionText}\n\nIMPORTANT: Response MUST be a JSON object containing "code" (Remotion TSX), "previewHtml" (standalone HTML preview), "suggestedTitle", and "detectedObjects".`;
+    // Optimalkan gambar atau frame video referensi jika ada
+    let referenceImageUrl: string | undefined = undefined;
+    if (reference) {
+      try {
+        referenceImageUrl = await optimizeReferenceImageForAI(reference);
+      } catch (e) {
+        referenceImageUrl = reference;
+      }
+    }
+
+    // Bangun prompt lengkap yang menyertakan brief pengguna, spesifikasi, dan panduan
+    let fullUserPrompt = `${basePrompt}`;
+    if (referenceImageUrl) {
+      fullUserPrompt += `\n\n🚨 PANDUAN WAJIB MEDIA REFERENSI TERLAMPIR:
+Gambar/media visual referensi pengguna TELAH TERLAMPIR pada request ini.
+Model AI WAJIB MENGANALISIS GAMBAR REFERENSI SECARA CERMAT DAN MEREKONSTRUKSI 100% SUBJEK ASLI (bentuk, proporsi, lekukan siluet, anatomi, tekstur, palet warna, dan elemen khasnya) ke dalam Remotion TSX ("code") dan HTML preview ("previewHtml").
+DILARANG KERAS MENGARANG BENTUK GEOMETRI SENDIRI yang berbeda dari gambar referensi!`;
+    }
+    if (isSvgTraceMode && svgCode) {
+      fullUserPrompt += `\n\nKODE SVG REFERENSI ASLI:\n\`\`\`xml\n${svgCode}\n\`\`\``;
+    }
+    fullUserPrompt += `\n\nIMPORTANT: Response MUST be a valid JSON object containing "code" (Remotion TSX), "previewHtml" (standalone HTML preview), "suggestedTitle", and "detectedObjects". Do NOT write any conversational text outside JSON.`;
 
     const rawResponse = await executeOpenAICompatibleChat({
       baseUrl,
       apiKey,
       model: model || (is9Router ? 'claude-3-5-sonnet' : 'anthropic/claude-3.5-sonnet'),
       systemInstruction: systemInstructionText,
-      userPrompt: combinedPrompt,
+      userPrompt: fullUserPrompt,
+      imageUrl: referenceImageUrl,
       temperature: targetTemperature,
       providerName,
     });
@@ -2292,10 +2316,16 @@ Output harus berupa JSON dengan struktur:
     });
 
     let cleaned = (rawResponse || "").trim();
+    cleaned = cleaned.replace(/<think>[\s\S]*?<\/think>/gi, "").trim();
     if (cleaned.startsWith("```json")) {
       cleaned = cleaned.replace(/^```json\s*/, "").replace(/\s*```$/, "");
     } else if (cleaned.startsWith("```")) {
       cleaned = cleaned.replace(/^```\s*/, "").replace(/\s*```$/, "");
+    }
+    const firstBrace = cleaned.indexOf("{");
+    const lastBrace = cleaned.lastIndexOf("}");
+    if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
+      cleaned = cleaned.substring(firstBrace, lastBrace + 1);
     }
     const parsed = JSON.parse(cleaned) as ApplyVariationResponse;
     if (parsed) {
@@ -2936,10 +2966,16 @@ Berikan output JSON dengan format:
     });
 
     let cleaned = (rawResponse || "{}").trim();
+    cleaned = cleaned.replace(/<think>[\s\S]*?<\/think>/gi, "").trim();
     if (cleaned.startsWith("```json")) {
       cleaned = cleaned.replace(/^```json\s*/, "").replace(/\s*```$/, "");
     } else if (cleaned.startsWith("```")) {
       cleaned = cleaned.replace(/^```\s*/, "").replace(/\s*```$/, "");
+    }
+    const firstBrace = cleaned.indexOf("{");
+    const lastBrace = cleaned.lastIndexOf("}");
+    if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
+      cleaned = cleaned.substring(firstBrace, lastBrace + 1);
     }
     const parsed = JSON.parse(cleaned) as GeneratePreviewFromTsxResponse;
     if (parsed.previewHtml) {
